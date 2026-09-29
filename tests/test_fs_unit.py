@@ -54,7 +54,7 @@ class FakeDatasets:
             "id": dataset_id,
             "file_size": sizes.get(dataset_id, 1024),
             "download_url": f"/api/datasets/{dataset_id}/display?to_ext=txt",
-            "state": "ok",
+            "state": self.store.get("dataset_states", {}).get(dataset_id, "ok"),
         }
 
 
@@ -483,6 +483,19 @@ class TestFileRead:
         ) as f:
             assert f.size == 10
             assert f.read() == b"R1CONTENT!"
+
+    def test_a_failed_dataset_is_an_error_not_an_empty_file(self):
+        from galaxy_fsspec.exceptions import GalaxyApiError
+
+        store = _store()
+        store["dataset_sizes"] = {"dsF": 0}
+        store["dataset_states"] = {"dsF": "error"}
+        fs = GalaxyFileSystem(
+            url="https://galaxy.example", api_key="test-key", skip_instance_cache=True
+        )
+        fs.gi = FakeGalaxyInstance(store)
+        with pytest.raises(GalaxyApiError):
+            fs.open("histories/History A/my result/sample1/forward", "rb")
 
 
 class TestLibrariesRoot:

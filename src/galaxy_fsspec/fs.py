@@ -167,16 +167,12 @@ class GalaxyFileSystem(AbstractFileSystem):
     ) -> tuple[int, str | None]:
         """Return ``(file_size, download_url)`` for a dataset via the datasets API."""
         if not dataset_id:
-            return 0, None
+            raise GalaxyApiError("Galaxy listed a dataset without an id")
         try:
             details = self.gi.datasets.show_dataset(dataset_id, hda_ldda=hda_ldda)
-        except Exception:
-            return 0, None
-        if not isinstance(details, dict):
-            return 0, None
-        size = _to_int(details.get("file_size")) or 0
-        dl_url = details.get("download_url")
-        return size, dl_url
+        except Exception as exc:
+            raise GalaxyApiError(f"failed to fetch dataset {dataset_id}: {exc}") from exc
+        return _readable_size(details, dataset_id), details.get("download_url")
 
     def _library_dataset_details(self, library_id: str, dataset_id: str) -> tuple[str, int]:
         """Return ``(ldda_id, file_size)`` for a library dataset.
@@ -185,7 +181,7 @@ class GalaxyFileSystem(AbstractFileSystem):
         as the other finds a different dataset instead of failing; only this endpoint maps them.
         """
         details = self.gi.libraries.show_dataset(library_id, dataset_id)
-        return details["ldda_id"], _to_int(details.get("file_size")) or 0
+        return details["ldda_id"], _readable_size(details, dataset_id)
 
     def _fetch_dataset_range(self, path: str, start: int, end: int) -> bytes:
         info = self._info(path)
@@ -631,6 +627,16 @@ class GalaxyFileSystem(AbstractFileSystem):
             url = urllib.parse.urljoin(url, resp.headers["Location"])
             resp.close()
         raise GalaxyApiError(f"too many redirects while downloading {url}")
+
+
+def _readable_size(details: dict, dataset_id: str) -> int:
+    """The size to read. Galaxy reports 0 for a dataset whose job failed or has not finished, so
+    0 is only believed when the state is ok, and a missing size is an error."""
+    size = _to_int(details.get("file_size"))
+    state = details.get("state")
+    if size is None or (size == 0 and state not in (None, "ok")):
+        raise GalaxyApiError(f"dataset {dataset_id} has no data to read (state {state!r})")
+    return size
 
 
 def _to_int(value: Any) -> int | None:
