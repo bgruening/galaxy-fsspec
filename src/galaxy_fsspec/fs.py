@@ -311,6 +311,10 @@ class GalaxyFileSystem(AbstractFileSystem):
 
     def _resolve_history(self, segment: str) -> dict:
         histories = self.gi.histories.get_histories()
+        # The names the listing gives out, so each of two histories sharing a name can be opened.
+        for display, h in dedupe_names(histories, numbered=self.show_hid_in_names):
+            if segment == display:
+                return h
         for h in histories:
             disp = name_with_prefix(None, h.get("name") or h["id"], self.show_hid_in_names)
             # Histories have no hid; numbered prefix not applied, so compare by full name.
@@ -346,6 +350,9 @@ class GalaxyFileSystem(AbstractFileSystem):
 
     def _resolve_library(self, segment: str) -> dict:
         libraries = self.gi.libraries.get_libraries()
+        for display, lib in dedupe_names(libraries, numbered=False):
+            if segment == display:
+                return lib
         for lib in libraries:
             disp = name_with_prefix(None, lib.get("name") or lib["id"], False)
             if segment == disp:

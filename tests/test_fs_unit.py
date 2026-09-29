@@ -196,6 +196,25 @@ class TestHistories:
         assert info["history_id"] == "hid1"
 
 
+class TestHistoriesSharingAName:
+    def test_each_one_can_be_opened(self):
+        store = _store()
+        store["histories"].append(
+            {
+                "id": "hid2",
+                "name": "History A",
+                "contents": [{"id": "ds2", "name": "second", "history_content_type": "dataset"}],
+            }
+        )
+        fs = GalaxyFileSystem(
+            url="https://galaxy.example", api_key="test-key", skip_instance_cache=True
+        )
+        fs.gi = FakeGalaxyInstance(store)
+        first, second = fs.ls("histories")
+        assert fs.ls(first) == [f"{first}/my-uploaded-dataset", f"{first}/my result"]
+        assert fs.ls(second) == [f"{second}/second"]
+
+
 class TestHistoryContents:
     def test_lists_what_the_history_panel_shows(self, fs):
         fs.gi.histories.store["histories"][0]["contents"] += [
