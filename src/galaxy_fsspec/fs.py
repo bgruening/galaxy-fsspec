@@ -12,7 +12,7 @@ import requests
 from fsspec.spec import AbstractFileSystem
 
 from galaxy_fsspec.client import build_galaxy_instance, show_hid_in_names_from_env
-from galaxy_fsspec.exceptions import NotFoundError, ReadOnlyError
+from galaxy_fsspec.exceptions import GalaxyApiError, NotFoundError, ReadOnlyError
 from galaxy_fsspec.file import GalaxyFile
 from galaxy_fsspec.paths import (
     dedupe_names,
@@ -134,6 +134,9 @@ class GalaxyFileSystem(AbstractFileSystem):
     ) -> GalaxyFile:
         if mode not in ("rb", "r"):
             raise ReadOnlyError(f"galaxy-fsspec is read-only; cannot open {mode!r}")
+        # The size found below is cached under this path, so it must be the stripped path the
+        # reads use, or a path starting with "/" (as Galaxy asks) reads as an empty file.
+        path = self._strip(path)
         info = self._info(path)
         if info["type"] != "file":
             raise IsADirectoryError(path)
@@ -142,15 +145,10 @@ class GalaxyFileSystem(AbstractFileSystem):
         # real size here so AbstractBufferedFile.read() actually returns bytes.
         if info.get("size", 0) == 0:
             if "library_dataset_id" in info:
-                ldda_id, size, dl_url = self._library_dataset_details(
-                    info["library_dataset_id"]
+                ldda_id, size = self._library_dataset_details(
+                    info["library_id"], info["library_dataset_id"]
                 )
-                info = {
-                    **info,
-                    "size": size,
-                    "ldda_id": ldda_id,
-                    "download_url": dl_url,
-                }
+                info = {**info, "size": size, "ldda_id": ldda_id}
             else:
                 size, dl_url = self._dataset_details(info.get("dataset_id"))
                 info = {**info, "size": size, "download_url": dl_url}
@@ -169,37 +167,21 @@ class GalaxyFileSystem(AbstractFileSystem):
     ) -> tuple[int, str | None]:
         """Return ``(file_size, download_url)`` for a dataset via the datasets API."""
         if not dataset_id:
-            return 0, None
+            raise GalaxyApiError("Galaxy listed a dataset without an id")
         try:
             details = self.gi.datasets.show_dataset(dataset_id, hda_ldda=hda_ldda)
-        except Exception:
-            return 0, None
-        if not isinstance(details, dict):
-            return 0, None
-        size = _to_int(details.get("file_size")) or 0
-        dl_url = details.get("download_url")
-        return size, dl_url
+        except Exception as exc:
+            raise GalaxyApiError(f"failed to fetch dataset {dataset_id}: {exc}") from exc
+        return _readable_size(details, dataset_id), details.get("download_url")
 
-    def _library_dataset_details(
-        self, dataset_id: str | None
-    ) -> tuple[str | None, int, str | None]:
-        """Return ``(ldda_id, file_size, download_url)`` for a library dataset.
+    def _library_dataset_details(self, library_id: str, dataset_id: str) -> tuple[str, int]:
+        """Return ``(ldda_id, file_size)`` for a library dataset.
 
-        Uses ``gi.datasets.show_dataset(id, hda_ldda='ldda')`` (the datasets
-        API) rather than the deprecated libraries contents endpoint.
+        A library listing gives LibraryDataset ids, but the bytes live under an LDDA. Decoding one
+        as the other finds a different dataset instead of failing; only this endpoint maps them.
         """
-        if not dataset_id:
-            return None, 0, None
-        try:
-            details = self.gi.datasets.show_dataset(dataset_id, hda_ldda="ldda")
-        except Exception:
-            return None, 0, None
-        if not isinstance(details, dict):
-            return None, 0, None
-        ldda_id = details.get("id")
-        size = _to_int(details.get("file_size")) or 0
-        dl_url = details.get("download_url")
-        return ldda_id, size, dl_url
+        details = self.gi.libraries.show_dataset(library_id, dataset_id)
+        return details["ldda_id"], _readable_size(details, dataset_id)
 
     def _fetch_dataset_range(self, path: str, start: int, end: int) -> bytes:
         info = self._info(path)
@@ -325,6 +307,10 @@ class GalaxyFileSystem(AbstractFileSystem):
 
     def _resolve_history(self, segment: str) -> dict:
         histories = self.gi.histories.get_histories()
+        # The names the listing gives out, so each of two histories sharing a name can be opened.
+        for display, h in dedupe_names(histories, numbered=self.show_hid_in_names):
+            if segment == display:
+                return h
         for h in histories:
             disp = name_with_prefix(None, h.get("name") or h["id"], self.show_hid_in_names)
             # Histories have no hid; numbered prefix not applied, so compare by full name.
@@ -360,6 +346,9 @@ class GalaxyFileSystem(AbstractFileSystem):
 
     def _resolve_library(self, segment: str) -> dict:
         libraries = self.gi.libraries.get_libraries()
+        for display, lib in dedupe_names(libraries, numbered=False):
+            if segment == display:
+                return lib
         for lib in libraries:
             disp = name_with_prefix(None, lib.get("name") or lib["id"], False)
             if segment == disp:
@@ -424,9 +413,16 @@ class GalaxyFileSystem(AbstractFileSystem):
     # History contents
     # ------------------------------------------------------------------ #
 
+    def _history_contents(self, history_id: str) -> list[dict]:
+        # What the history panel shows. Without the filters Galaxy also returns deleted datasets and
+        # the hidden copies it makes of every file put into a collection; details brings file_size.
+        return self.gi.histories.show_history(
+            history_id, contents=True, deleted=False, visible=True, details="all"
+        )
+
     def _list_history_contents(self, history: dict, path: str) -> list[dict]:
         hid = history["id"]
-        contents = self.gi.histories.show_history(hid, contents=True)
+        contents = self._history_contents(hid)
         return self._contents_to_entries(contents, path, history_id=hid)
 
     def _contents_to_entries(
@@ -461,20 +457,20 @@ class GalaxyFileSystem(AbstractFileSystem):
         ``segments`` is everything below the history folder; ``segments[0]`` is a
         top-level collection, any later segments descend into nested collections.
         """
-        contents = self.gi.histories.show_history(history["id"], contents=True)
+        contents = self._history_contents(history["id"])
         current = self._resolve_in_contents(contents, segments[0], history["id"])
         if not current.get("_is_collection"):
             # A top-level dataset has no children.
             raise NotFoundError(path)
-        # Walk intermediate segments through nested collections.
+        elements = self._collection_elements(current["id"])
+        # A nested collection's id is not an HDCA id, so fetching by it finds another collection or
+        # fails; walk the elements the top-level collection already carries instead.
         for seg in segments[1:]:
-            elements = self._collection_elements(current["id"])
             current = self._resolve_in_elements(elements, seg, current["id"])
             if not current.get("_is_collection"):
                 # Landed on a dataset leaf; no further descent is possible.
                 raise NotFoundError(path)
-        # ``current`` is the final collection; list its elements.
-        elements = self._collection_elements(current["id"])
+            elements = current["elements"]
         return self._elements_to_entries(elements, path, history["id"])
 
     def _resolve_in_contents(self, contents: list[dict], segment: str, history_id: str) -> dict:
@@ -496,7 +492,11 @@ class GalaxyFileSystem(AbstractFileSystem):
                 continue
             inner = _element_inner(original)
             if original.get("element_type") == "dataset_collection":
-                return {"id": inner.get("id"), "_is_collection": True}
+                return {
+                    "id": inner.get("id"),
+                    "_is_collection": True,
+                    "elements": inner.get("elements") or [],
+                }
             return {"id": inner.get("id"), "_is_collection": False}
         raise NotFoundError(segment)
 
@@ -566,9 +566,10 @@ class GalaxyFileSystem(AbstractFileSystem):
         """
         if end <= start:
             return b""
-        url = f"{self._url}/api/datasets/{urllib.parse.quote(dataset_id)}/display"
+        # raw asks for the stored file; rendering it fails for a library dataset, which has no hid.
+        url = f"{self._url}/api/datasets/{urllib.parse.quote(dataset_id)}/display?raw=true"
         if hda_ldda != "hda":
-            url += f"?hda_ldda={hda_ldda}"
+            url += f"&hda_ldda={hda_ldda}"
         return self._download_from_url(url, start, end, dataset_id)
 
     def _download_range_from_url(
@@ -595,8 +596,7 @@ class GalaxyFileSystem(AbstractFileSystem):
         self, url: str, start: int, end: int, label: str
     ) -> bytes:
         length = end - start
-        headers = {"x-api-key": self._key, "Range": f"bytes={start}-{end - 1}"}
-        resp = requests.get(url, headers=headers, timeout=60, stream=True)
+        resp = self._get_range(url, start, end)
         if resp.status_code == 206:
             return _read_stream(resp, length)
         if resp.status_code == 200:
@@ -604,6 +604,39 @@ class GalaxyFileSystem(AbstractFileSystem):
         if resp.status_code in (401, 403):
             raise ReadOnlyError(f"Galaxy refused dataset access: {resp.status_code}")
         raise NotFoundError(f"dataset {label} (HTTP {resp.status_code})")
+
+    def _get_range(self, url: str, start: int, end: int) -> requests.Response:
+        """GET ``[start, end)`` of ``url``, following redirects by hand.
+
+        requests keeps a custom header like ``x-api-key`` when a redirect goes to another host, such
+        as the object store a dataset lives in, so each hop decides again whether the key may go.
+        """
+        galaxy = urllib.parse.urlsplit(self._url)
+        for _hop in range(10):
+            target = urllib.parse.urlsplit(url)
+            headers = {"Range": f"bytes={start}-{end - 1}"}
+            # Scheme and the whole netloc, not the hostname: https://evil.com\@galaxy.example/ has
+            # the hostname galaxy.example, but requests fetches it from evil.com.
+            if (target.scheme, target.netloc) == (galaxy.scheme, galaxy.netloc):
+                headers["x-api-key"] = self._key
+            resp = requests.get(
+                url, headers=headers, timeout=60, stream=True, allow_redirects=False
+            )
+            if resp.status_code not in (301, 302, 303, 307, 308):
+                return resp
+            url = urllib.parse.urljoin(url, resp.headers["Location"])
+            resp.close()
+        raise GalaxyApiError(f"too many redirects while downloading {url}")
+
+
+def _readable_size(details: dict, dataset_id: str) -> int:
+    """The size to read. Galaxy reports 0 for a dataset whose job failed or has not finished, so
+    0 is only believed when the state is ok, and a missing size is an error."""
+    size = _to_int(details.get("file_size"))
+    state = details.get("state")
+    if size is None or (size == 0 and state not in (None, "ok")):
+        raise GalaxyApiError(f"dataset {dataset_id} has no data to read (state {state!r})")
+    return size
 
 
 def _to_int(value: Any) -> int | None:

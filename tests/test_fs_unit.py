@@ -15,10 +15,19 @@ class FakeHistories:
         # Realistic: bioblend returns only id + name here.
         return [{"id": h["id"], "name": h["name"]} for h in self.store["histories"]]
 
-    def show_history(self, history_id, contents=True):
+    def show_history(self, history_id, contents=False, deleted=None, visible=None, details=None):
         hist = next(h for h in self.store["histories"] if h["id"] == history_id)
         if contents:
-            return hist["contents"]
+            items = [
+                item
+                for item in hist["contents"]
+                if (deleted is None or item.get("deleted", False) == deleted)
+                and (visible is None or item.get("visible", True) == visible)
+            ]
+            # Like Galaxy, only the detailed listing has file_size.
+            if details == "all":
+                return items
+            return [{k: v for k, v in item.items() if k != "file_size"} for item in items]
         return {
             "id": hist["id"],
             "name": hist["name"],
@@ -40,22 +49,12 @@ class FakeDatasets:
         self.store = store
 
     def show_dataset(self, dataset_id, hda_ldda="hda"):
-        # Check library dataset sizes first, then history dataset_sizes.
-        for lib in self.store.get("libraries", []):
-            for item in lib.get("contents", []):
-                if item.get("type") == "file" and item.get("id") == dataset_id:
-                    return {
-                        "id": item.get("ldda_id", dataset_id),
-                        "file_size": item.get("file_size", 1024),
-                        "download_url": f"/api/datasets/{item.get('ldda_id', dataset_id)}/display?to_ext=txt",
-                        "state": "ok",
-                    }
         sizes = self.store.get("dataset_sizes", {})
         return {
             "id": dataset_id,
             "file_size": sizes.get(dataset_id, 1024),
             "download_url": f"/api/datasets/{dataset_id}/display?to_ext=txt",
-            "state": "ok",
+            "state": self.store.get("dataset_states", {}).get(dataset_id, "ok"),
         }
 
 
@@ -65,6 +64,12 @@ class FakeLibraries:
 
     def get_libraries(self):
         return [{"id": lib["id"], "name": lib["name"]} for lib in self.store["libraries"]]
+
+    def show_dataset(self, library_id, dataset_id):
+        """Like Galaxy, the only call that maps a LibraryDataset id to its LDDA."""
+        lib = next(lb for lb in self.store["libraries"] if lb["id"] == library_id)
+        item = next(it for it in lib["contents"] if it["id"] == dataset_id)
+        return {"ldda_id": item["ldda_id"], "file_size": item["file_size"], "state": "ok"}
 
     def show_library(self, library_id, contents=False):
         lib = next(lb for lb in self.store["libraries"] if lb["id"] == library_id)
@@ -115,25 +120,27 @@ def _store():
                     "element_type": "dataset_collection",
                     "element_index": 0,
                     "element_identifier": "sample1",
+                    # Like Galaxy, a nested collection comes inline, and its id is not one the
+                    # dataset_collections endpoint accepts, so it is not in this map.
                     "object": {
                         "id": "subcoll1",
                         "name": "sample1",
                         "collection_type": "paired",
+                        "elements": [
+                            {
+                                "element_type": "hda",
+                                "element_index": 0,
+                                "element_identifier": "forward",
+                                "object": {"id": "dsF", "name": "R1"},
+                            },
+                            {
+                                "element_type": "hda",
+                                "element_index": 1,
+                                "element_identifier": "reverse",
+                                "object": {"id": "dsR", "name": "R2"},
+                            },
+                        ],
                     },
-                },
-            ],
-            "subcoll1": [
-                {
-                    "element_type": "hda",
-                    "element_index": 0,
-                    "element_identifier": "forward",
-                    "object": {"id": "dsF", "name": "R1"},
-                },
-                {
-                    "element_type": "hda",
-                    "element_index": 1,
-                    "element_identifier": "reverse",
-                    "object": {"id": "dsR", "name": "R2"},
                 },
             ],
         },
@@ -189,7 +196,38 @@ class TestHistories:
         assert info["history_id"] == "hid1"
 
 
+class TestHistoriesSharingAName:
+    def test_each_one_can_be_opened(self):
+        store = _store()
+        store["histories"].append(
+            {
+                "id": "hid2",
+                "name": "History A",
+                "contents": [{"id": "ds2", "name": "second", "history_content_type": "dataset"}],
+            }
+        )
+        fs = GalaxyFileSystem(
+            url="https://galaxy.example", api_key="test-key", skip_instance_cache=True
+        )
+        fs.gi = FakeGalaxyInstance(store)
+        first, second = fs.ls("histories")
+        assert fs.ls(first) == [f"{first}/my-uploaded-dataset", f"{first}/my result"]
+        assert fs.ls(second) == [f"{second}/second"]
+
+
 class TestHistoryContents:
+    def test_lists_what_the_history_panel_shows(self, fs):
+        fs.gi.histories.store["histories"][0]["contents"] += [
+            {"id": "gone", "name": "deleted-draft", "history_content_type": "dataset", "deleted": True},
+            {"id": "copy", "name": "hidden-copy", "history_content_type": "dataset", "visible": False},
+        ]
+        entries = fs.ls("histories/History A", detail=True)
+        assert [e["name"] for e in entries] == [
+            "histories/History A/my-uploaded-dataset",
+            "histories/History A/my result",
+        ]
+        assert entries[0]["size"] == 11
+
     def test_lists_dataset_and_collection(self, fs):
         names = fs.ls("histories/History A")
         assert "histories/History A/my-uploaded-dataset" in names
@@ -304,7 +342,7 @@ class TestDownloadRange:
             def iter_content(self, chunk_size=8192):
                 yield self._data
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             captured["url"] = url
             captured["headers"] = headers
             return FakeResp(b"HELLO")
@@ -314,6 +352,44 @@ class TestDownloadRange:
         assert data == b"HELLO"
         assert captured["headers"]["Range"] == "bytes=0-4"
         assert captured["headers"]["x-api-key"] == "test-key"
+
+    @pytest.mark.parametrize(
+        ("location", "key"),
+        [
+            ("/api/datasets/ds1/inner", "test-key"),
+            ("https://bucket.s3.example/object", None),
+            ("http://galaxy.example/plain", None),
+            ("https://evil.com\\@galaxy.example/steal", None),
+        ],
+        ids=["same-server", "object-store", "downgrade", "disguised-host"],
+    )
+    def test_the_api_key_stays_on_the_galaxy_server(self, fs, monkeypatch, location, key):
+        import galaxy_fsspec.fs as fsmod
+
+        sent = []
+
+        class FakeResp:
+            def __init__(self, status_code, location=None, data=b""):
+                self.status_code = status_code
+                self.headers = {"Location": location} if location else {}
+                self._data = data
+
+            def iter_content(self, chunk_size=8192):
+                yield self._data
+
+            def close(self):
+                pass
+
+        def fake_get(url, headers, allow_redirects, **kwargs):
+            assert allow_redirects is False
+            sent.append(headers.get("x-api-key"))
+            if len(sent) == 1:
+                return FakeResp(302, location)
+            return FakeResp(206, data=b"HELLO")
+
+        monkeypatch.setattr(fsmod, "requests", type("R", (), {"get": staticmethod(fake_get)}))
+        assert fs._download_range("ds1", 0, 5) == b"HELLO"
+        assert sent == ["test-key", key]
 
     def test_fetch_200_slices(self, fs, monkeypatch):
         import galaxy_fsspec.fs as fsmod
@@ -347,7 +423,7 @@ class TestFileRead:
             def iter_content(self, chunk_size=8192):
                 yield self._content
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             rng = headers["Range"]
             start, end = rng[6:].split("-")
             return FakeResp(b"HELLOWORLD"[int(start) : int(end) + 1])
@@ -355,6 +431,28 @@ class TestFileRead:
         monkeypatch.setattr(fsmod, "requests", type("R", (), {"get": staticmethod(fake_get)}))
         with fs.open("histories/History A/my-uploaded-dataset", "rb") as f:
             assert f.read() == b"HELLOWORLD"
+
+    def test_a_path_starting_with_a_slash_reads_everything(self, fs, monkeypatch):
+        import galaxy_fsspec.fs as fsmod
+
+        fs.gi.datasets.store["dataset_sizes"] = {"dsF": 10}
+
+        class FakeResp:
+            status_code = 206
+
+            def __init__(self, content):
+                self._content = content
+
+            def iter_content(self, chunk_size=8192):
+                yield self._content
+
+        def fake_get(url, headers, **kwargs):
+            start, end = headers["Range"][6:].split("-")
+            return FakeResp(b"R1CONTENT!"[int(start) : int(end) + 1])
+
+        monkeypatch.setattr(fsmod, "requests", type("R", (), {"get": staticmethod(fake_get)}))
+        with fs.open("/histories/History A/my result/sample1/forward", "rb") as f:
+            assert f.read() == b"R1CONTENT!"
 
     def test_open_and_read_inside_collection(self, fs, monkeypatch):
         """A dataset leaf inside a collection is listed with size 0; opening it
@@ -373,7 +471,7 @@ class TestFileRead:
             def iter_content(self, chunk_size=8192):
                 yield self._content
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             rng = headers["Range"]
             start, end = rng[6:].split("-")
             payload = b"R1CONTENT!"[int(start) : int(end) + 1]
@@ -385,6 +483,19 @@ class TestFileRead:
         ) as f:
             assert f.size == 10
             assert f.read() == b"R1CONTENT!"
+
+    def test_a_failed_dataset_is_an_error_not_an_empty_file(self):
+        from galaxy_fsspec.exceptions import GalaxyApiError
+
+        store = _store()
+        store["dataset_sizes"] = {"dsF": 0}
+        store["dataset_states"] = {"dsF": "error"}
+        fs = GalaxyFileSystem(
+            url="https://galaxy.example", api_key="test-key", skip_instance_cache=True
+        )
+        fs.gi = FakeGalaxyInstance(store)
+        with pytest.raises(GalaxyApiError):
+            fs.open("histories/History A/my result/sample1/forward", "rb")
 
 
 class TestLibrariesRoot:
@@ -426,7 +537,7 @@ class TestLibraryContents:
 
 class TestLibraryFileRead:
     def test_open_and_read_library_dataset(self, fs, monkeypatch):
-        """Library datasets are downloaded via the download_url from datasets API."""
+        """Library bytes are read from the LDDA, never by the LibraryDataset id."""
         import galaxy_fsspec.fs as fsmod
 
         captured = {}
@@ -440,7 +551,7 @@ class TestLibraryFileRead:
             def iter_content(self, chunk_size=8192):
                 yield self._content
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             captured["url"] = url
             captured["headers"] = headers
             rng = headers["Range"]
@@ -451,9 +562,7 @@ class TestLibraryFileRead:
         with fs.open("libraries/Shared Data/genomes/hg38.fa", "rb") as f:
             assert f.size == 14
             assert f.read() == b"GTACGTACGTACGT"
-        # download_url should be used (to_ext stripped, Range header sent)
-        assert "display" in captured["url"]
-        assert "to_ext" not in captured["url"]
+        assert captured["url"].endswith("/api/datasets/ldda1/display?raw=true&hda_ldda=ldda")
 
     def test_open_and_read_root_library_dataset(self, fs, monkeypatch):
         import galaxy_fsspec.fs as fsmod
@@ -467,7 +576,7 @@ class TestLibraryFileRead:
             def iter_content(self, chunk_size=8192):
                 yield self._content
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             rng = headers["Range"]
             start, end = rng[6:].split("-")
             return FakeResp(b"ATGCATGCAT"[int(start) : int(end) + 1])
