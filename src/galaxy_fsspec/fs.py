@@ -410,9 +410,16 @@ class GalaxyFileSystem(AbstractFileSystem):
     # History contents
     # ------------------------------------------------------------------ #
 
+    def _history_contents(self, history_id: str) -> list[dict]:
+        # What the history panel shows. Without the filters Galaxy also returns deleted datasets and
+        # the hidden copies it makes of every file put into a collection; details brings file_size.
+        return self.gi.histories.show_history(
+            history_id, contents=True, deleted=False, visible=True, details="all"
+        )
+
     def _list_history_contents(self, history: dict, path: str) -> list[dict]:
         hid = history["id"]
-        contents = self.gi.histories.show_history(hid, contents=True)
+        contents = self._history_contents(hid)
         return self._contents_to_entries(contents, path, history_id=hid)
 
     def _contents_to_entries(
@@ -447,7 +454,7 @@ class GalaxyFileSystem(AbstractFileSystem):
         ``segments`` is everything below the history folder; ``segments[0]`` is a
         top-level collection, any later segments descend into nested collections.
         """
-        contents = self.gi.histories.show_history(history["id"], contents=True)
+        contents = self._history_contents(history["id"])
         current = self._resolve_in_contents(contents, segments[0], history["id"])
         if not current.get("_is_collection"):
             # A top-level dataset has no children.

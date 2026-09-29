@@ -15,10 +15,19 @@ class FakeHistories:
         # Realistic: bioblend returns only id + name here.
         return [{"id": h["id"], "name": h["name"]} for h in self.store["histories"]]
 
-    def show_history(self, history_id, contents=True):
+    def show_history(self, history_id, contents=False, deleted=None, visible=None, details=None):
         hist = next(h for h in self.store["histories"] if h["id"] == history_id)
         if contents:
-            return hist["contents"]
+            items = [
+                item
+                for item in hist["contents"]
+                if (deleted is None or item.get("deleted", False) == deleted)
+                and (visible is None or item.get("visible", True) == visible)
+            ]
+            # Like Galaxy, only the detailed listing has file_size.
+            if details == "all":
+                return items
+            return [{k: v for k, v in item.items() if k != "file_size"} for item in items]
         return {
             "id": hist["id"],
             "name": hist["name"],
@@ -186,6 +195,18 @@ class TestHistories:
 
 
 class TestHistoryContents:
+    def test_lists_what_the_history_panel_shows(self, fs):
+        fs.gi.histories.store["histories"][0]["contents"] += [
+            {"id": "gone", "name": "deleted-draft", "history_content_type": "dataset", "deleted": True},
+            {"id": "copy", "name": "hidden-copy", "history_content_type": "dataset", "visible": False},
+        ]
+        entries = fs.ls("histories/History A", detail=True)
+        assert [e["name"] for e in entries] == [
+            "histories/History A/my-uploaded-dataset",
+            "histories/History A/my result",
+        ]
+        assert entries[0]["size"] == 11
+
     def test_lists_dataset_and_collection(self, fs):
         names = fs.ls("histories/History A")
         assert "histories/History A/my-uploaded-dataset" in names
