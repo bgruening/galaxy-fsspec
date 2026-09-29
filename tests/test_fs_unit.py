@@ -356,6 +356,28 @@ class TestFileRead:
         with fs.open("histories/History A/my-uploaded-dataset", "rb") as f:
             assert f.read() == b"HELLOWORLD"
 
+    def test_a_path_starting_with_a_slash_reads_everything(self, fs, monkeypatch):
+        import galaxy_fsspec.fs as fsmod
+
+        fs.gi.datasets.store["dataset_sizes"] = {"dsF": 10}
+
+        class FakeResp:
+            status_code = 206
+
+            def __init__(self, content):
+                self._content = content
+
+            def iter_content(self, chunk_size=8192):
+                yield self._content
+
+        def fake_get(url, headers, **kwargs):
+            start, end = headers["Range"][6:].split("-")
+            return FakeResp(b"R1CONTENT!"[int(start) : int(end) + 1])
+
+        monkeypatch.setattr(fsmod, "requests", type("R", (), {"get": staticmethod(fake_get)}))
+        with fs.open("/histories/History A/my result/sample1/forward", "rb") as f:
+            assert f.read() == b"R1CONTENT!"
+
     def test_open_and_read_inside_collection(self, fs, monkeypatch):
         """A dataset leaf inside a collection is listed with size 0; opening it
         must fetch the real size via datasets.show_dataset so read() returns bytes."""

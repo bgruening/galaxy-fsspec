@@ -134,6 +134,9 @@ class GalaxyFileSystem(AbstractFileSystem):
     ) -> GalaxyFile:
         if mode not in ("rb", "r"):
             raise ReadOnlyError(f"galaxy-fsspec is read-only; cannot open {mode!r}")
+        # The size found below is cached under this path, so it must be the stripped path the
+        # reads use, or a path starting with "/" (as Galaxy asks) reads as an empty file.
+        path = self._strip(path)
         info = self._info(path)
         if info["type"] != "file":
             raise IsADirectoryError(path)
