@@ -323,7 +323,7 @@ class TestDownloadRange:
             def iter_content(self, chunk_size=8192):
                 yield self._data
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             captured["url"] = url
             captured["headers"] = headers
             return FakeResp(b"HELLO")
@@ -333,6 +333,44 @@ class TestDownloadRange:
         assert data == b"HELLO"
         assert captured["headers"]["Range"] == "bytes=0-4"
         assert captured["headers"]["x-api-key"] == "test-key"
+
+    @pytest.mark.parametrize(
+        ("location", "key"),
+        [
+            ("/api/datasets/ds1/inner", "test-key"),
+            ("https://bucket.s3.example/object", None),
+            ("http://galaxy.example/plain", None),
+            ("https://evil.com\\@galaxy.example/steal", None),
+        ],
+        ids=["same-server", "object-store", "downgrade", "disguised-host"],
+    )
+    def test_the_api_key_stays_on_the_galaxy_server(self, fs, monkeypatch, location, key):
+        import galaxy_fsspec.fs as fsmod
+
+        sent = []
+
+        class FakeResp:
+            def __init__(self, status_code, location=None, data=b""):
+                self.status_code = status_code
+                self.headers = {"Location": location} if location else {}
+                self._data = data
+
+            def iter_content(self, chunk_size=8192):
+                yield self._data
+
+            def close(self):
+                pass
+
+        def fake_get(url, headers, allow_redirects, **kwargs):
+            assert allow_redirects is False
+            sent.append(headers.get("x-api-key"))
+            if len(sent) == 1:
+                return FakeResp(302, location)
+            return FakeResp(206, data=b"HELLO")
+
+        monkeypatch.setattr(fsmod, "requests", type("R", (), {"get": staticmethod(fake_get)}))
+        assert fs._download_range("ds1", 0, 5) == b"HELLO"
+        assert sent == ["test-key", key]
 
     def test_fetch_200_slices(self, fs, monkeypatch):
         import galaxy_fsspec.fs as fsmod
@@ -366,7 +404,7 @@ class TestFileRead:
             def iter_content(self, chunk_size=8192):
                 yield self._content
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             rng = headers["Range"]
             start, end = rng[6:].split("-")
             return FakeResp(b"HELLOWORLD"[int(start) : int(end) + 1])
@@ -414,7 +452,7 @@ class TestFileRead:
             def iter_content(self, chunk_size=8192):
                 yield self._content
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             rng = headers["Range"]
             start, end = rng[6:].split("-")
             payload = b"R1CONTENT!"[int(start) : int(end) + 1]
@@ -481,7 +519,7 @@ class TestLibraryFileRead:
             def iter_content(self, chunk_size=8192):
                 yield self._content
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             captured["url"] = url
             captured["headers"] = headers
             rng = headers["Range"]
@@ -506,7 +544,7 @@ class TestLibraryFileRead:
             def iter_content(self, chunk_size=8192):
                 yield self._content
 
-        def fake_get(url, headers, timeout, stream):
+        def fake_get(url, headers, **kwargs):
             rng = headers["Range"]
             start, end = rng[6:].split("-")
             return FakeResp(b"ATGCATGCAT"[int(start) : int(end) + 1])

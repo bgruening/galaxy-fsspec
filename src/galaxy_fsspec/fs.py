@@ -12,7 +12,7 @@ import requests
 from fsspec.spec import AbstractFileSystem
 
 from galaxy_fsspec.client import build_galaxy_instance, show_hid_in_names_from_env
-from galaxy_fsspec.exceptions import NotFoundError, ReadOnlyError
+from galaxy_fsspec.exceptions import GalaxyApiError, NotFoundError, ReadOnlyError
 from galaxy_fsspec.file import GalaxyFile
 from galaxy_fsspec.paths import (
     dedupe_names,
@@ -593,8 +593,7 @@ class GalaxyFileSystem(AbstractFileSystem):
         self, url: str, start: int, end: int, label: str
     ) -> bytes:
         length = end - start
-        headers = {"x-api-key": self._key, "Range": f"bytes={start}-{end - 1}"}
-        resp = requests.get(url, headers=headers, timeout=60, stream=True)
+        resp = self._get_range(url, start, end)
         if resp.status_code == 206:
             return _read_stream(resp, length)
         if resp.status_code == 200:
@@ -602,6 +601,29 @@ class GalaxyFileSystem(AbstractFileSystem):
         if resp.status_code in (401, 403):
             raise ReadOnlyError(f"Galaxy refused dataset access: {resp.status_code}")
         raise NotFoundError(f"dataset {label} (HTTP {resp.status_code})")
+
+    def _get_range(self, url: str, start: int, end: int) -> requests.Response:
+        """GET ``[start, end)`` of ``url``, following redirects by hand.
+
+        requests keeps a custom header like ``x-api-key`` when a redirect goes to another host, such
+        as the object store a dataset lives in, so each hop decides again whether the key may go.
+        """
+        galaxy = urllib.parse.urlsplit(self._url)
+        for _hop in range(10):
+            target = urllib.parse.urlsplit(url)
+            headers = {"Range": f"bytes={start}-{end - 1}"}
+            # Scheme and the whole netloc, not the hostname: https://evil.com\@galaxy.example/ has
+            # the hostname galaxy.example, but requests fetches it from evil.com.
+            if (target.scheme, target.netloc) == (galaxy.scheme, galaxy.netloc):
+                headers["x-api-key"] = self._key
+            resp = requests.get(
+                url, headers=headers, timeout=60, stream=True, allow_redirects=False
+            )
+            if resp.status_code not in (301, 302, 303, 307, 308):
+                return resp
+            url = urllib.parse.urljoin(url, resp.headers["Location"])
+            resp.close()
+        raise GalaxyApiError(f"too many redirects while downloading {url}")
 
 
 def _to_int(value: Any) -> int | None:
