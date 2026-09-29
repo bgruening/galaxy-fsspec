@@ -40,16 +40,6 @@ class FakeDatasets:
         self.store = store
 
     def show_dataset(self, dataset_id, hda_ldda="hda"):
-        # Check library dataset sizes first, then history dataset_sizes.
-        for lib in self.store.get("libraries", []):
-            for item in lib.get("contents", []):
-                if item.get("type") == "file" and item.get("id") == dataset_id:
-                    return {
-                        "id": item.get("ldda_id", dataset_id),
-                        "file_size": item.get("file_size", 1024),
-                        "download_url": f"/api/datasets/{item.get('ldda_id', dataset_id)}/display?to_ext=txt",
-                        "state": "ok",
-                    }
         sizes = self.store.get("dataset_sizes", {})
         return {
             "id": dataset_id,
@@ -65,6 +55,12 @@ class FakeLibraries:
 
     def get_libraries(self):
         return [{"id": lib["id"], "name": lib["name"]} for lib in self.store["libraries"]]
+
+    def show_dataset(self, library_id, dataset_id):
+        """Like Galaxy, the only call that maps a LibraryDataset id to its LDDA."""
+        lib = next(lb for lb in self.store["libraries"] if lb["id"] == library_id)
+        item = next(it for it in lib["contents"] if it["id"] == dataset_id)
+        return {"ldda_id": item["ldda_id"], "file_size": item["file_size"], "state": "ok"}
 
     def show_library(self, library_id, contents=False):
         lib = next(lb for lb in self.store["libraries"] if lb["id"] == library_id)
@@ -448,7 +444,7 @@ class TestLibraryContents:
 
 class TestLibraryFileRead:
     def test_open_and_read_library_dataset(self, fs, monkeypatch):
-        """Library datasets are downloaded via the download_url from datasets API."""
+        """Library bytes are read from the LDDA, never by the LibraryDataset id."""
         import galaxy_fsspec.fs as fsmod
 
         captured = {}
@@ -473,9 +469,7 @@ class TestLibraryFileRead:
         with fs.open("libraries/Shared Data/genomes/hg38.fa", "rb") as f:
             assert f.size == 14
             assert f.read() == b"GTACGTACGTACGT"
-        # download_url should be used (to_ext stripped, Range header sent)
-        assert "display" in captured["url"]
-        assert "to_ext" not in captured["url"]
+        assert captured["url"].endswith("/api/datasets/ldda1/display?raw=true&hda_ldda=ldda")
 
     def test_open_and_read_root_library_dataset(self, fs, monkeypatch):
         import galaxy_fsspec.fs as fsmod

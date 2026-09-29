@@ -145,15 +145,10 @@ class GalaxyFileSystem(AbstractFileSystem):
         # real size here so AbstractBufferedFile.read() actually returns bytes.
         if info.get("size", 0) == 0:
             if "library_dataset_id" in info:
-                ldda_id, size, dl_url = self._library_dataset_details(
-                    info["library_dataset_id"]
+                ldda_id, size = self._library_dataset_details(
+                    info["library_id"], info["library_dataset_id"]
                 )
-                info = {
-                    **info,
-                    "size": size,
-                    "ldda_id": ldda_id,
-                    "download_url": dl_url,
-                }
+                info = {**info, "size": size, "ldda_id": ldda_id}
             else:
                 size, dl_url = self._dataset_details(info.get("dataset_id"))
                 info = {**info, "size": size, "download_url": dl_url}
@@ -183,26 +178,14 @@ class GalaxyFileSystem(AbstractFileSystem):
         dl_url = details.get("download_url")
         return size, dl_url
 
-    def _library_dataset_details(
-        self, dataset_id: str | None
-    ) -> tuple[str | None, int, str | None]:
-        """Return ``(ldda_id, file_size, download_url)`` for a library dataset.
+    def _library_dataset_details(self, library_id: str, dataset_id: str) -> tuple[str, int]:
+        """Return ``(ldda_id, file_size)`` for a library dataset.
 
-        Uses ``gi.datasets.show_dataset(id, hda_ldda='ldda')`` (the datasets
-        API) rather than the deprecated libraries contents endpoint.
+        A library listing gives LibraryDataset ids, but the bytes live under an LDDA. Decoding one
+        as the other finds a different dataset instead of failing; only this endpoint maps them.
         """
-        if not dataset_id:
-            return None, 0, None
-        try:
-            details = self.gi.datasets.show_dataset(dataset_id, hda_ldda="ldda")
-        except Exception:
-            return None, 0, None
-        if not isinstance(details, dict):
-            return None, 0, None
-        ldda_id = details.get("id")
-        size = _to_int(details.get("file_size")) or 0
-        dl_url = details.get("download_url")
-        return ldda_id, size, dl_url
+        details = self.gi.libraries.show_dataset(library_id, dataset_id)
+        return details["ldda_id"], _to_int(details.get("file_size")) or 0
 
     def _fetch_dataset_range(self, path: str, start: int, end: int) -> bytes:
         info = self._info(path)
@@ -569,9 +552,10 @@ class GalaxyFileSystem(AbstractFileSystem):
         """
         if end <= start:
             return b""
-        url = f"{self._url}/api/datasets/{urllib.parse.quote(dataset_id)}/display"
+        # raw asks for the stored file; rendering it fails for a library dataset, which has no hid.
+        url = f"{self._url}/api/datasets/{urllib.parse.quote(dataset_id)}/display?raw=true"
         if hda_ldda != "hda":
-            url += f"?hda_ldda={hda_ldda}"
+            url += f"&hda_ldda={hda_ldda}"
         return self._download_from_url(url, start, end, dataset_id)
 
     def _download_range_from_url(
