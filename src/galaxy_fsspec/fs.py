@@ -459,15 +459,15 @@ class GalaxyFileSystem(AbstractFileSystem):
         if not current.get("_is_collection"):
             # A top-level dataset has no children.
             raise NotFoundError(path)
-        # Walk intermediate segments through nested collections.
+        elements = self._collection_elements(current["id"])
+        # A nested collection's id is not an HDCA id, so fetching by it finds another collection or
+        # fails; walk the elements the top-level collection already carries instead.
         for seg in segments[1:]:
-            elements = self._collection_elements(current["id"])
             current = self._resolve_in_elements(elements, seg, current["id"])
             if not current.get("_is_collection"):
                 # Landed on a dataset leaf; no further descent is possible.
                 raise NotFoundError(path)
-        # ``current`` is the final collection; list its elements.
-        elements = self._collection_elements(current["id"])
+            elements = current["elements"]
         return self._elements_to_entries(elements, path, history["id"])
 
     def _resolve_in_contents(self, contents: list[dict], segment: str, history_id: str) -> dict:
@@ -489,7 +489,11 @@ class GalaxyFileSystem(AbstractFileSystem):
                 continue
             inner = _element_inner(original)
             if original.get("element_type") == "dataset_collection":
-                return {"id": inner.get("id"), "_is_collection": True}
+                return {
+                    "id": inner.get("id"),
+                    "_is_collection": True,
+                    "elements": inner.get("elements") or [],
+                }
             return {"id": inner.get("id"), "_is_collection": False}
         raise NotFoundError(segment)
 

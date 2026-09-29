@@ -120,25 +120,27 @@ def _store():
                     "element_type": "dataset_collection",
                     "element_index": 0,
                     "element_identifier": "sample1",
+                    # Like Galaxy, a nested collection comes inline, and its id is not one the
+                    # dataset_collections endpoint accepts, so it is not in this map.
                     "object": {
                         "id": "subcoll1",
                         "name": "sample1",
                         "collection_type": "paired",
+                        "elements": [
+                            {
+                                "element_type": "hda",
+                                "element_index": 0,
+                                "element_identifier": "forward",
+                                "object": {"id": "dsF", "name": "R1"},
+                            },
+                            {
+                                "element_type": "hda",
+                                "element_index": 1,
+                                "element_identifier": "reverse",
+                                "object": {"id": "dsR", "name": "R2"},
+                            },
+                        ],
                     },
-                },
-            ],
-            "subcoll1": [
-                {
-                    "element_type": "hda",
-                    "element_index": 0,
-                    "element_identifier": "forward",
-                    "object": {"id": "dsF", "name": "R1"},
-                },
-                {
-                    "element_type": "hda",
-                    "element_index": 1,
-                    "element_identifier": "reverse",
-                    "object": {"id": "dsR", "name": "R2"},
                 },
             ],
         },
