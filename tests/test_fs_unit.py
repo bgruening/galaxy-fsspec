@@ -327,6 +327,35 @@ class TestNotFound:
             fs.info("histories/History A/missing")
 
 
+class TestTimeouts:
+    def test_galaxy_api_calls_give_up_after_a_minute_by_default(self):
+        assert GalaxyFileSystem(url="https://galaxy.example", api_key="k").gi.timeout == 60
+
+    def test_the_timeout_can_be_set(self):
+        assert GalaxyFileSystem(url="https://galaxy.example", api_key="k", timeout=5).gi.timeout == 5
+
+    def test_downloads_use_the_same_timeout(self, monkeypatch):
+        import galaxy_fsspec.fs as fsmod
+
+        filesystem = GalaxyFileSystem(url="https://galaxy.example", api_key="test-key", timeout=5)
+        filesystem.gi = FakeGalaxyInstance(_store())
+        timeouts = []
+
+        class FakeResp:
+            status_code = 206
+
+            def iter_content(self, chunk_size=8192):
+                yield b"HELLO"
+
+        def fake_get(url, headers, timeout, **kwargs):
+            timeouts.append(timeout)
+            return FakeResp()
+
+        monkeypatch.setattr(fsmod, "requests", type("R", (), {"get": staticmethod(fake_get)}))
+        filesystem._download_range("ds1", 0, 5)
+        assert timeouts == [5]
+
+
 class TestDownloadRange:
     def test_fetch_uses_requests_206(self, fs, monkeypatch):
         import galaxy_fsspec.fs as fsmod

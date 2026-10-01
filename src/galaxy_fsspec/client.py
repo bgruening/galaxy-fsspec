@@ -8,6 +8,8 @@ from bioblend.galaxy import GalaxyInstance
 
 from galaxy_fsspec.exceptions import GalaxyFsspecError
 
+DEFAULT_TIMEOUT = 60.0
+
 
 def show_hid_in_names_from_env() -> bool:
     """Read the GALAXY_FSSPEC_SHOW_HID_IN_NAMES env var.
@@ -21,6 +23,7 @@ def show_hid_in_names_from_env() -> bool:
 def build_galaxy_instance(
     url: str | None = None,
     api_key: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> GalaxyInstance:
     """Construct a bioblend GalaxyInstance from args or environment.
 
@@ -34,4 +37,8 @@ def build_galaxy_instance(
         raise GalaxyFsspecError(
             "A Galaxy API key is required. Set GALAXY_USER_API_KEY or pass api_key=..."
         )
-    return GalaxyInstance(url=url, key=api_key)
+    gi = GalaxyInstance(url=url, key=api_key)
+    # GalaxyInstance takes no timeout argument, and without one bioblend waits forever on a server
+    # that accepts the connection but never answers.
+    gi.timeout = timeout
+    return gi

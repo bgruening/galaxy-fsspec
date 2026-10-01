@@ -11,7 +11,11 @@ import fsspec
 import requests
 from fsspec.spec import AbstractFileSystem
 
-from galaxy_fsspec.client import build_galaxy_instance, show_hid_in_names_from_env
+from galaxy_fsspec.client import (
+    DEFAULT_TIMEOUT,
+    build_galaxy_instance,
+    show_hid_in_names_from_env,
+)
 from galaxy_fsspec.exceptions import GalaxyApiError, NotFoundError, ReadOnlyError
 from galaxy_fsspec.file import GalaxyFile
 from galaxy_fsspec.paths import (
@@ -46,6 +50,9 @@ class GalaxyFileSystem(AbstractFileSystem):
     History folders expose ``created`` and ``last_modified`` timestamps via
     :meth:`info`. Set ``show_hid_in_names=True`` (or ``GALAXY_FSSPEC_SHOW_HID_IN_NAMES=true``)
     to prefix every entry with its Galaxy ``hid`` in the style ``1-my-dataset``.
+
+    ``timeout`` is how many seconds any request to Galaxy, including a download, may wait for the
+    server to answer.
     """
 
     protocol = "galaxy"
@@ -57,10 +64,12 @@ class GalaxyFileSystem(AbstractFileSystem):
         api_key: str | None = None,
         show_hid_in_names: bool | None = None,
         cache_ttl: float = _CACHE_TTL,
+        timeout: float = DEFAULT_TIMEOUT,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.gi = build_galaxy_instance(url=url, api_key=api_key)
+        self.timeout = float(timeout)
+        self.gi = build_galaxy_instance(url=url, api_key=api_key, timeout=self.timeout)
         self._url: str = str(url or self.gi.base_url)
         self._key: str = str(api_key or self.gi.key)
         self.show_hid_in_names: bool = (
@@ -620,7 +629,7 @@ class GalaxyFileSystem(AbstractFileSystem):
             if (target.scheme, target.netloc) == (galaxy.scheme, galaxy.netloc):
                 headers["x-api-key"] = self._key
             resp = requests.get(
-                url, headers=headers, timeout=60, stream=True, allow_redirects=False
+                url, headers=headers, timeout=self.timeout, stream=True, allow_redirects=False
             )
             if resp.status_code not in (301, 302, 303, 307, 308):
                 return resp
