@@ -563,6 +563,14 @@ class TestLibraryContents:
         assert info["type"] == "file"
         assert info["library_dataset_id"] == "dsL1"
 
+    def test_a_folder_lists_only_what_is_inside_it(self, fs):
+        # Siblings whose names start with the folder's name are not inside it.
+        fs.gi.libraries.store["libraries"][0]["contents"] += [
+            {"id": "f2", "type": "folder", "name": "/genomes_old"},
+            {"id": "dsL3", "type": "file", "name": "/genomes.txt", "ldda_id": "ldda3", "file_size": 3},
+        ]
+        assert fs.ls("libraries/Shared Data/genomes") == ["libraries/Shared Data/genomes/hg38.fa"]
+
 
 class TestLibraryFileRead:
     def test_open_and_read_library_dataset(self, fs, monkeypatch):

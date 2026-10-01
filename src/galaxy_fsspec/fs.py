@@ -392,15 +392,15 @@ class GalaxyFileSystem(AbstractFileSystem):
         flat list per library so browsing nested folders doesn't re-fetch it.
         """
         flat = self._library_flat_contents(library["id"])
-        # Build the Galaxy-side prefix.  Root is "/", a sub-folder is "/seg1/seg2".
-        prefix = "/" + "/".join(segments) if segments else "/"
+        # What every item inside this folder starts with: "/" at the root, "/seg1/seg2/" below it.
+        # The trailing slash keeps a sibling such as "/seg1/seg2_old" out of "/seg1/seg2".
+        prefix = "/" + "".join(f"{segment}/" for segment in segments)
         entries: list[dict] = []
         for item in flat:
             name = item.get("name", "")
             if name == "/" or not name.startswith(prefix):
                 continue
-            # Remainder after the prefix.
-            remainder = name[1:] if prefix == "/" else name[len(prefix) + 1 :]
+            remainder = name[len(prefix) :]
             if not remainder or "/" in remainder:
                 continue  # skip self and nested descendants
             is_folder = item.get("type") == "folder"
