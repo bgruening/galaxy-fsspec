@@ -3,4 +3,4 @@
 from galaxy_fsspec.fs import GalaxyFileSystem
 
 __all__ = ["GalaxyFileSystem"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"
